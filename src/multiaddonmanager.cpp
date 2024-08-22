@@ -32,6 +32,7 @@
 #include <string>
 #include <sstream>
 #include "iserver.h"
+#include "engine/igameeventsystem.h"
 
 #include "tier0/memdbgon.h"
 
@@ -97,25 +98,19 @@ void* FASTCALL Hook_HostStateRequest(void *a1, void **pRequest);
 HostStateRequest_t g_pfnHostStateRequest = nullptr;
 funchook_t *g_pHostStateRequestHook = nullptr;
 
-int g_iSendNetMessage;
-
-class GameSessionConfiguration_t { };
+class GameSessionConfiguration_t { }; 
 
 SH_DECL_HOOK0_void(IServerGameDLL, GameServerSteamAPIActivated, SH_NOATTRIB, 0);
 SH_DECL_HOOK3_void(INetworkServerService, StartupServer, SH_NOATTRIB, 0, const GameSessionConfiguration_t &, ISource2WorldSession *, const char *);
 SH_DECL_HOOK6(IServerGameClients, ClientConnect, SH_NOATTRIB, 0, bool, CPlayerSlot, const char*, uint64, const char *, bool, CBufferString *);
 SH_DECL_HOOK3_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool, bool, bool);
-
-#ifdef PLATFORM_WINDOWS
-SH_DECL_MANUALHOOK2(SendNetMessage, 15, 0, 0, bool, CNetMessage *, NetChannelBufType_t);
-#else
-SH_DECL_MANUALHOOK2(SendNetMessage, 16, 0, 0, bool, CNetMessage *, NetChannelBufType_t);
-#endif
+SH_DECL_HOOK8_void(IGameEventSystem, PostEventAbstract, SH_NOATTRIB, 0, CSplitScreenSlot, bool, int, const uint64*, INetworkMessageInternal*, const CNetMessage*, unsigned long, NetChannelBufType_t);
 
 MultiAddonManager g_MultiAddonManager;
 INetworkGameServer *g_pNetworkGameServer = nullptr;
 CSteamGameServerAPIContext g_SteamAPI;
 CGlobalVars *gpGlobals = nullptr;
+IGameEventSystem *g_gameEventSystem = nullptr;
 
 // Interface to other plugins
 CAddonManagerInterface g_AddonManagerInterface;
@@ -132,6 +127,7 @@ bool MultiAddonManager::Load(PluginId id, ISmmAPI *ismm, char *error, size_t max
 	GET_V_IFACE_ANY(GetEngineFactory, g_pNetworkServerService, INetworkServerService, NETWORKSERVERSERVICE_INTERFACE_VERSION);
 	GET_V_IFACE_ANY(GetEngineFactory, g_pNetworkMessages, INetworkMessages, NETWORKMESSAGES_INTERFACE_VERSION);
 	GET_V_IFACE_ANY(GetFileSystemFactory, g_pFullFileSystem, IFileSystem, FILESYSTEM_INTERFACE_VERSION);
+	GET_V_IFACE_ANY(GetEngineFactory, g_gameEventSystem, IGameEventSystem, GAMEEVENTSYSTEM_INTERFACE_VERSION);
 
 	// Required to get the IMetamodListener events
 	g_SMAPI->AddListener( this, this );
@@ -167,9 +163,9 @@ bool MultiAddonManager::Load(PluginId id, ISmmAPI *ismm, char *error, size_t max
 	SH_ADD_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &MultiAddonManager::Hook_StartupServer), true);
 	SH_ADD_HOOK(IServerGameClients, ClientConnect, g_pSource2GameClients, SH_MEMBER(this, &MultiAddonManager::Hook_ClientConnect), false);
 	SH_ADD_HOOK(IServerGameDLL, GameFrame, g_pSource2Server, SH_MEMBER(this, &MultiAddonManager::Hook_GameFrame), true);
+	SH_ADD_HOOK_MEMFUNC(IGameEventSystem, PostEventAbstract, g_gameEventSystem, this, &MultiAddonManager::Hook_PostEvent, false);
 
 	void *pServerSideClientVTable = engineModule.FindVirtualTable("CServerSideClient");
-	g_iSendNetMessage = SH_ADD_MANUALDVPHOOK(SendNetMessage, pServerSideClientVTable, SH_MEMBER(&g_MultiAddonManager, &MultiAddonManager::Hook_SendNetMessage), false);
 
 	if (late)
 	{
@@ -196,7 +192,7 @@ bool MultiAddonManager::Unload(char *error, size_t maxlen)
 	SH_REMOVE_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &MultiAddonManager::Hook_StartupServer), true);
 	SH_REMOVE_HOOK(IServerGameClients, ClientConnect, g_pSource2GameClients, SH_MEMBER(this, &MultiAddonManager::Hook_ClientConnect), false);
 	SH_REMOVE_HOOK(IServerGameDLL, GameFrame, g_pSource2Server, SH_MEMBER(this, &MultiAddonManager::Hook_GameFrame), true);
-	SH_REMOVE_HOOK_ID(g_iSendNetMessage);
+	SH_REMOVE_HOOK_MEMFUNC(IGameEventSystem, PostEventAbstract, g_gameEventSystem, this, &MultiAddonManager::Hook_PostEvent, false);
 
 	if (g_pHostStateRequestHook)
 	{
@@ -623,15 +619,15 @@ void MultiAddonManager::Hook_StartupServer(const GameSessionConfiguration_t &con
 	RefreshAddons();
 }
 
-bool MultiAddonManager::Hook_SendNetMessage(CNetMessage *pData, NetChannelBufType_t bufType)
+void MultiAddonManager::Hook_PostEvent(CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64* clients, INetworkMessageInternal* pEvent, const CNetMessage* pData, unsigned long nSize, NetChannelBufType_t bufType)
 {
-	NetMessageInfo_t *info = pData->GetNetMessage()->GetNetMessageInfo();
+	NetMessageInfo_t *info = pEvent->GetNetMessageInfo();
 
 	// 7 for signon messages
 	if (info->m_MessageId != 7 || g_MultiAddonManager.m_ExtraAddons.Count() == 0 || !CommandLine()->HasParm("-dedicated"))
-		RETURN_META_VALUE(MRES_IGNORED, true);
+		RETURN_META(MRES_IGNORED);
 
-	auto pMsg = pData->ToPB<CNETMsg_SignonState>();
+	auto pMsg = const_cast<CNetMessage*>(pData)->ToPB<CNETMsg_SignonState>();
 
 	// If the server is changing maps then we don't want to send all addons in this message
 	// Because for SOME reason, this can put the client in a state of limbo after the 25/07/2024 update
@@ -645,7 +641,7 @@ bool MultiAddonManager::Hook_SendNetMessage(CNetMessage *pData, NetChannelBufTyp
 	CServerSideClient *pClient = META_IFACEPTR(CServerSideClient);
 
 	ClientJoinInfo_t *pPendingClient = GetPendingClient(pClient->GetClientSteamID()->ConvertToUint64());
-
+	
 	if (pPendingClient)
 	{
 		// This only happens after the client connects, therefore the signon message is for SIGNONSTATE_PRESPAWN
@@ -658,7 +654,7 @@ bool MultiAddonManager::Hook_SendNetMessage(CNetMessage *pData, NetChannelBufTyp
 		pPendingClient->signon_timestamp = Plat_FloatTime();
 	}
 
-	RETURN_META_VALUE(MRES_HANDLED, true);
+	RETURN_META(MRES_HANDLED);
 }
 
 void* FASTCALL Hook_HostStateRequest(void *a1, void **pRequest)

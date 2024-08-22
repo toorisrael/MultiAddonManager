@@ -74,9 +74,9 @@ public:
 	bool Unload(char *error, size_t maxlen);
 	void *OnMetamodQuery(const char *iface, int *ret);
 public: //hooks
+	void Hook_PostEvent(CSplitScreenSlot nSlot, bool bLocalOnly, int nClientCount, const uint64* clients, INetworkMessageInternal* pEvent, const CNetMessage* pData, unsigned long nSize, NetChannelBufType_t bufType);
 	void Hook_GameServerSteamAPIActivated();
 	void Hook_StartupServer(const GameSessionConfiguration_t &config, ISource2WorldSession *, const char *);
-	bool Hook_SendNetMessage(CNetMessage *pData, NetChannelBufType_t bufType);
 	bool Hook_ClientConnect(CPlayerSlot slot, const char *pszName, uint64 xuid, const char *pszNetworkID, bool unk1, CBufferString *pRejectReason);
 	void Hook_GameFrame(bool simulating, bool bFirstTick, bool bLastTick);
 
